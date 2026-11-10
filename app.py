@@ -9,7 +9,7 @@ All times are IST and are the candle CLOSE time (entry/exit happen at candle clo
 """
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ LONG_IN, LONG_SL, LONG_TP, LONG_TP_ST = 20, 9, 65, 58
 SHORT_IN, SHORT_SL, SHORT_TP = 77, 88, 47
 RSI_LEN, ST_LEN, ST_MULT = 14, 10, 3.0
 # -------------------------------------------
+HIST_OPTS = [1000, 2000, 3000, 5000, 8000, 10000]   # candles per timeframe for the backtest
 TFS = ["5m", "15m", "30m", "1h", "4h"]
 TF_MS = {"5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000}
 HOSTS = ["https://data-api.binance.vision", "https://api.binance.com",
@@ -107,7 +108,12 @@ def fetch_history(sym, tf, total):
         p = {"symbol": sym, "interval": tf, "limit": lim}
         if end:
             p["endTime"] = end
-        raw = api("/api/v3/klines", p)
+        try:
+            raw = api("/api/v3/klines", p)
+        except Exception:
+            if rows:                       # keep what we already got instead of losing everything
+                break
+            raise
         if not raw:
             break
         rows = raw + rows
@@ -148,27 +154,38 @@ def load_one(sym, tf, total, ttl, store):
     return df
 
 
-def load_many(pairs, total, ttl):
+def load_many(pairs, total, ttl, progress=None):
     store = _store()                       # get the cache in the main thread, not in workers
+    now = time.time()
+    for k in [k for k, v in store.items() if now - v[0] > 1800]:
+        store.pop(k, None)                 # drop old data so big histories don't pile up in memory
+    res = {}
     with ThreadPoolExecutor(6) as ex:
-        res = list(ex.map(lambda p: load_one(p[0], p[1], total, ttl, store), pairs))
-    return dict(zip(pairs, res))
+        futs = {ex.submit(load_one, s, t, total, ttl, store): (s, t) for s, t in pairs}
+        for n, f in enumerate(as_completed(futs), 1):
+            res[futs[f]] = f.result()
+            if progress:
+                progress(n / len(pairs))   # called from the main thread only
+    return {p: res[p] for p in pairs}
 
 
 # ---------------- BACKTEST ----------------
-def _trade(sym, tf, side, j, i, result, reason, df):
-    cl, r = df.close.values, df.rsi.values
-    ts = df.t.dt.strftime(FMT).values
+def _trade(sym, tf, side, j, i, result, reason, df, ts):
+    cl, r, rej = df.close.values, df.rsi.values, df.rej.values
     e, x = cl[j], cl[i]
     pct = (x / e - 1) * 100 if side == "Long" else (e - x) / e * 100
+    entry = f"🟢 RSI ≤ {LONG_IN}" if side == "Long" else f"🔴 RSI ≥ {SHORT_IN}"
+    st_at_exit = ("✅ reject" if rej[i] else "no") if side == "Long" else "–"
     return {"Coin": sym.replace("USDT", ""), "TF": tf, "Side": side,
             "Entry Time": ts[j], "Entry Price": e, "Exit Time": ts[i], "Exit Price": x,
-            "Exit Reason": reason, "RSI In": r[j], "RSI Out": r[i], "Candles": i - j,
+            "Entry Logic": entry, "Exit Logic": reason, "Bearish ST": st_at_exit,
+            "RSI In": r[j], "RSI Out": r[i], "Candles": i - j,
             "PnL %": pct, "_ts": df.cm.values[j], "_state": result}
 
 
 def run_bt(df, sym, tf, strict=False):
     r, rej, cl = df.rsi.values, df.rej.values, df.close.values
+    ts = df.t.dt.strftime(FMT).values                         # formatted once per series (fast for 10000 candles)
     out, pos = [], None
     for i in range(len(df)):
         if np.isnan(r[i]):
@@ -183,24 +200,24 @@ def run_bt(df, sym, tf, strict=False):
         reason = None
         if side == "Long":
             if r[i] <= LONG_SL:
-                reason = f"RSI stop (<= {LONG_SL})"
+                reason = f"🛑 RSI stop (≤ {LONG_SL})"
             elif r[i] >= LONG_TP:
-                reason = f"RSI target (>= {LONG_TP})"
+                reason = f"🎯 RSI target (≥ {LONG_TP})"
             elif r[i] >= LONG_TP_ST and rej[i]:
-                reason = f"RSI {LONG_TP_ST} + ST reject"
+                reason = f"🐻 RSI ≥ {LONG_TP_ST} + Bearish ST reject"
         else:
             if r[i] >= SHORT_SL:
-                reason = f"RSI stop (>= {SHORT_SL})"
+                reason = f"🛑 RSI stop (≥ {SHORT_SL})"
             elif r[i] <= SHORT_TP:
-                reason = f"RSI target (<= {SHORT_TP})"
+                reason = f"🎯 RSI target (≤ {SHORT_TP})"
         if reason and strict and "stop" not in reason:
             if not (cl[i] > cl[j] if side == "Long" else cl[i] < cl[j]):
                 reason = None                              # strict: price must be in profit too
         if reason:
-            out.append(_trade(sym, tf, side, j, i, "CLOSED", reason, df))
+            out.append(_trade(sym, tf, side, j, i, "CLOSED", reason, df, ts))
             pos = None
     if pos:
-        out.append(_trade(sym, tf, pos[0], pos[1], len(df) - 1, "OPEN", "Still open", df))
+        out.append(_trade(sym, tf, pos[0], pos[1], len(df) - 1, "OPEN", "⏳ Still open", df, ts))
     return out
 
 
@@ -257,6 +274,12 @@ def coin_tf_table(v):
     return out.sort_values(["Coin", "_o"]).drop(columns="_o")
 
 
+def exit_logic_table(v):
+    rows = [{"Side": side, "Exit Logic": reason, **sstats(g)}
+            for (side, reason), g in v.groupby(["Side", "Exit Logic"])]
+    return pd.DataFrame(rows)
+
+
 def px(x):
     return f"{x:,.2f}" if x >= 100 else f"{x:.6g}"
 
@@ -279,7 +302,8 @@ def trade_view(g):
     g["Loss #"] = np.nan
     cl = g[(g.Result == "LOSS")]
     g.loc[cl.index, "Loss #"] = cl["PnL ₹"].rank(method="min")     # 1 = biggest loss
-    cols = ["#", "Side", "Entry Time", "Entry Price", "Exit Time", "Exit Price", "Exit Reason",
+    cols = ["#", "Side", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
+            "Entry Logic", "Exit Logic", "Bearish ST",
             "RSI In", "RSI Out", "Candles", "PnL %", "PnL ₹", "Result", "Loss #"]
     return g[cols].style.apply(hl, axis=1).format(
         {"Entry Price": px, "Exit Price": px, "RSI In": "{:.1f}", "RSI Out": "{:.1f}",
@@ -297,7 +321,9 @@ def settings():
 def backtest_tab(pairs):
     c1, c2 = st.columns(2)
     tfs = c1.multiselect("Timeframes", TFS, default=TFS)
-    hist = c2.select_slider("History (candles per TF)", [1000, 2000, 3000, 5000, 8000], value=3000)
+    hist = c2.select_slider("History (candles per TF)", HIST_OPTS, value=3000)
+    if hist >= 8000:
+        st.caption(f"⏱ {hist} candles ki data techukodaniki konchem time padutundi (progress bar chupistundi).")
     c3, c4 = st.columns(2)
     cap = c3.number_input("Capital ₹", 10000, 10_000_000, 100000, 10000)
     per = c4.slider("Capital per trade %", 10, 100, 50, 10)
@@ -306,8 +332,10 @@ def backtest_tab(pairs):
         if not pairs or not tfs:
             st.warning("Pairs, timeframes select cheyyi.")
             return
-        with st.spinner("Binance nunchi data techukuntunnanu..."):
-            data = load_many([(s, t) for s in pairs for t in tfs], hist, 600)
+        prog = st.progress(0.0, text="Binance nunchi data techukuntunnanu...")
+        data = load_many([(s, t) for s in pairs for t in tfs], hist, 600,
+                         progress=lambda x: prog.progress(x, text=f"Data load avutondi... {int(x * 100)}%"))
+        prog.empty()
         bad = [f"{s}-{t}" for (s, t), d in data.items() if d is None]
         st.session_state["bt"] = {"tr": make_trades(data, cap * per / 100, strict), "bad": bad,
                                   "cap": cap, "hist": hist, "data": data}
@@ -384,6 +412,9 @@ def summary(v, cap, n_open):
     with st.container(border=True):
         st.subheader("Coin-wise: Long vs Short")
         st.dataframe(cs, hide_index=True)
+    with st.container(border=True):
+        st.subheader("Exit logic wise")
+        st.dataframe(exit_logic_table(v), hide_index=True)
     ct = coin_tf_table(v)
     with st.container(border=True):
         st.subheader("Coin × Timeframe (wins / losses)")
@@ -399,25 +430,40 @@ def summary(v, cap, n_open):
 
 def boxes(tr):
     coins = sorted(tr.Coin.unique())
-    coin = st.selectbox("Coin", coins)
-    c = tr[tr.Coin == coin]
-    for tf in TFS:
-        g = c[c.TF == tf]
-        if g.empty:
-            continue
-        closed = g[g.Result != "OPEN"]
-        with st.container(border=True):
-            st.subheader(f"{coin} • {tf}")
-            if closed.empty:
-                st.caption("Closed trades levu.")
-            else:
-                T, L, S = sstats(closed), sstats(closed[closed.Side == "Long"]), sstats(closed[closed.Side == "Short"])
-                st.markdown(
-                    f"**Trades {T['Trades']}** · ✅ Wins **{T['Wins']}** · ❌ Losses **{T['Losses']}** · "
-                    f"Win **{T['Win %']}%** · PnL **₹{T['PnL ₹']:,}**\n\n"
-                    f"🟢 Long {L['Wins']}W/{L['Losses']}L ({L['Win %'] if L['Trades'] else '-'}%) · "
-                    f"🔴 Short {S['Wins']}W/{S['Losses']}L ({S['Win %'] if S['Trades'] else '-'}%)")
-            st.dataframe(trade_view(g), hide_index=True, height=min(420, 60 + 36 * len(g)))
+    sel = st.multiselect("Coins", coins, default=coins)
+    if not sel:
+        st.info("Kanisam oka coin select cheyyi.")
+        return
+    st.caption(f"Entry logic: 🟢 Long RSI ≤ {LONG_IN} · 🔴 Short RSI ≥ {SHORT_IN}  |  Exit logic: "
+               f"🎯 Long RSI ≥ {LONG_TP} · 🐻 Long RSI ≥ {LONG_TP_ST} + Bearish ST reject · 🛑 Long RSI ≤ {LONG_SL} · "
+               f"🎯 Short RSI ≤ {SHORT_TP} · 🛑 Short RSI ≥ {SHORT_SL}")
+    for coin in sel:                                           # coin-wise -> timeframe-wise
+        c = tr[tr.Coin == coin]
+        cc = c[c.Result != "OPEN"]
+        if cc.empty:
+            head = f"🪙 {coin} — closed trades levu"
+        else:
+            T = sstats(cc)
+            head = f"🪙 {coin} — {T['Trades']} trades · {T['Wins']}W/{T['Losses']}L · {T['Win %']}% · ₹{T['PnL ₹']:,}"
+        with st.expander(head, expanded=len(sel) == 1):
+            for tf in TFS:
+                g = c[c.TF == tf]
+                if g.empty:
+                    continue
+                closed = g[g.Result != "OPEN"]
+                with st.container(border=True):
+                    st.subheader(f"{coin} • {tf}")
+                    if closed.empty:
+                        st.caption("Closed trades levu.")
+                    else:
+                        T, L, S = (sstats(closed), sstats(closed[closed.Side == "Long"]),
+                                   sstats(closed[closed.Side == "Short"]))
+                        st.markdown(
+                            f"**Trades {T['Trades']}** · ✅ Wins **{T['Wins']}** · ❌ Losses **{T['Losses']}** · "
+                            f"Win **{T['Win %']}%** · PnL **₹{T['PnL ₹']:,}**\n\n"
+                            f"🟢 Long {L['Wins']}W/{L['Losses']}L ({L['Win %'] if L['Trades'] else '-'}%) · "
+                            f"🔴 Short {S['Wins']}W/{S['Losses']}L ({S['Win %'] if S['Trades'] else '-'}%)")
+                    st.dataframe(trade_view(g), hide_index=True, height=min(420, 60 + 36 * len(g)))
     st.caption("Dark red = ee box lo biggest loss (Loss #1). Grey = inka open (stats lo lekkaledu). "
                "Times = candle close, IST.")
 
@@ -470,6 +516,8 @@ def main():
             f"Exit: RSI ≥ {LONG_TP} (or ≥ {LONG_TP_ST} if a bearish Supertrend line rejects price).\n"
             f"- **RSI Short** — RSI ≥ {SHORT_IN} → sell. Stop: RSI ≥ {SHORT_SL}. Exit: RSI ≤ {SHORT_TP}.\n"
             "- Oka coin + timeframe ki okkate position (exit ayyaka matrame next entry).\n"
+            "- Backtest history 10000 candles varaku (TF ki). Prathi trade lo entry/exit time, price, "
+            "entry logic, exit logic (RSI target / Bearish ST reject / stop) chupistundi.\n"
             "- **Win** = price PnL > 0 matrame. RSI target hit ayyi price loss lo unte adi LOSS.\n"
             "- RSI trades ki price stop ledu, RSI level ye stop, kabatti loss pedda undochu.\n"
             "- Times IST, candle close time.")
