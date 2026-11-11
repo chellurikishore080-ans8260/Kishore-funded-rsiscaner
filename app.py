@@ -20,8 +20,8 @@ DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL"   # funded pairs (POL,
 ALIASES = {"MATIC": "POL"}               # Binance renamed MATIC to POL
 LONG_IN, LONG_SL, LONG_TP = 31.5, 9, 57
 SHORT_IN, SHORT_SL, SHORT_TP = 69, 89, 37
-MAX_LOSS = 1300         # Rs: a trade is stopped as soon as its loss reaches this (all timeframes except 4h)
-MAX_LOSS_4H = 3000      # Rs: same, for the 4h timeframe only
+MAX_LOSS = 0            # Rs: optional price-loss stop per trade (all timeframes except 4h). 0 = OFF
+MAX_LOSS_4H = 0         # Rs: same, for the 4h timeframe only. 0 = OFF
 RSI_LEN, ST_LEN, ST_MULT = 14, 10, 3.0
 # -------------------------------------------
 HIST_OPTS = [1000, 2000, 3000, 5000, 8000, 10000]   # candles per timeframe for the backtest
@@ -354,7 +354,7 @@ def backtest_tab(pairs):
     ml4 = c6.number_input("Max loss ₹ per trade (4h)", 0, 1_000_000, MAX_LOSS_4H, 100,
                           help="4h timeframe ki matrame. 0 = off.")
     notional = cap * per / 100
-    if notional:
+    if notional and (ml or ml4):
         st.caption(f"Trade size ₹{notional:,.0f} → max loss = price {ml / notional * 100:.2f}% (4h: {ml4 / notional * 100:.2f}%) "
                    "entry price nundi viruddha disha lo velithe stop.")
     limits = {t: (ml4 if t == "4h" else ml) for t in TFS}
@@ -494,8 +494,7 @@ def boxes(tr):
                             f"🟢 Long {L['Wins']}W/{L['Losses']}L ({L['Win %'] if L['Trades'] else '-'}%) · "
                             f"🔴 Short {S['Wins']}W/{S['Losses']}L ({S['Win %'] if S['Trades'] else '-'}%)")
                     st.dataframe(trade_view(g), hide_index=True, height=min(420, 60 + 36 * len(g)))
-    st.caption("🛑 Max loss stop: candle high/low tho check, Exit Price = stop price; Exit Time = aa candle close time. "
-               "Dark red = ee box lo biggest loss (Loss #1). Grey = inka open (stats lo lekkaledu). "
+    st.caption("Dark red = ee box lo biggest loss (Loss #1). Grey = inka open (stats lo lekkaledu). "
                "Times = candle close, IST.")
 
 
@@ -547,8 +546,7 @@ def main():
             f"Exit: RSI ≥ {LONG_TP}.\n"
             f"- **RSI Short** — RSI ≥ {SHORT_IN} → sell. Stop: RSI ≥ {SHORT_SL}. Exit: RSI ≤ {SHORT_TP}.\n"
             "- Oka coin + timeframe ki okkate position (exit ayyaka matrame next entry).\n"
-            f"- **Max loss stop** — trade loss ₹{MAX_LOSS:,} ki (4h lo ₹{MAX_LOSS_4H:,}) cherite trade stop. "
-            "Candle high/low tho check chestam, exit price = stop price (gap ayite open price).\n"
+            "- Exit RSI target leda RSI stop tho matrame (price loss stop default ga OFF; Backtest lo Max loss ₹ box lo pette on avutundi).\n"
             "- Backtest history 10000 candles varaku (TF ki). Prathi trade lo entry/exit time, price, "
             "entry logic, exit logic (RSI target / stop) chupistundi.\n"
             "- **Win** = price PnL > 0 matrame. RSI target hit ayyi price loss lo unte adi LOSS.\n"
