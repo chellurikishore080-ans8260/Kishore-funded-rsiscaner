@@ -1,7 +1,7 @@
 """Kishore Funded Pairs - RSI Long + RSI Short scanner & backtest (Binance Spot, Streamlit).
 
 Only the funded pairs you list are scanned/backtested. Same logic as the main RSI scanner:
-  RSI Long : RSI <= 31.5 buy at candle close | exit RSI >= 57 | stop RSI <= 16
+  RSI Long : RSI <= 31.5 buy at candle close | exit RSI >= 57 | stop RSI <= 9
   RSI Short: RSI >= 69 sell at candle close | exit RSI <= 37 | stop RSI >= 89
 A trade is a WIN only if the price PnL is > 0 (one single win definition).
 All times are IST and are the candle CLOSE time (entry/exit happen at candle close).
@@ -18,7 +18,7 @@ import streamlit as st
 # ---------------- EDIT HERE ----------------
 DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL"   # funded pairs (POL, DOT, LINK removed)
 ALIASES = {"MATIC": "POL"}               # Binance renamed MATIC to POL
-LONG_IN, LONG_SL, LONG_TP = 31.5, 16, 57
+LONG_IN, LONG_SL, LONG_TP = 31.5, 9, 57
 SHORT_IN, SHORT_SL, SHORT_TP = 69, 89, 37
 MAX_LOSS = 1300         # Rs: a trade is stopped as soon as its loss reaches this (all timeframes except 4h)
 MAX_LOSS_4H = 3000      # Rs: same, for the 4h timeframe only
