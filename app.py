@@ -302,11 +302,14 @@ def trade_view(g):
     g["Loss #"] = np.nan
     cl = g[(g.Result == "LOSS")]
     g.loc[cl.index, "Loss #"] = cl["PnL ₹"].rank(method="min")     # 1 = biggest loss
-    cols = ["#", "Side", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
-            "Entry Logic", "Exit Logic", "Bearish ST",
-            "RSI In", "RSI Out", "Candles", "PnL %", "PnL ₹", "Result", "Loss #"]
+    # logic sits right next to its price: Entry Price -> Entry Logic, Exit Price -> Exit Logic
+    g["Entry Logic"] = g["Entry Logic"] + g["RSI In"].map(lambda x: f"  (RSI {x:.1f})")
+    g["Exit Logic"] = g["Exit Logic"] + g["RSI Out"].map(lambda x: f"  (RSI {x:.1f})")
+    cols = ["#", "Side", "Entry Time", "Entry Price", "Entry Logic",
+            "Exit Time", "Exit Price", "Exit Logic", "Bearish ST",
+            "Candles", "PnL %", "PnL ₹", "Result", "Loss #"]
     return g[cols].style.apply(hl, axis=1).format(
-        {"Entry Price": px, "Exit Price": px, "RSI In": "{:.1f}", "RSI Out": "{:.1f}",
+        {"Entry Price": px, "Exit Price": px,
          "PnL %": "{:+.2f}", "PnL ₹": "{:+,.0f}", "Loss #": "{:.0f}"}, na_rep="")
 
 
