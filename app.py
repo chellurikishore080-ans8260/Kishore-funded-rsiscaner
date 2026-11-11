@@ -16,7 +16,7 @@ import requests
 import streamlit as st
 
 # ---------------- EDIT HERE ----------------
-DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL"   # funded pairs (POL, DOT, LINK removed)
+DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL, DOT, LINK, POL"   # funded pairs (editable in the app)
 ALIASES = {"MATIC": "POL"}               # Binance renamed MATIC to POL
 LONG_IN, LONG_SL, LONG_TP = 31.5, 16, 57
 SHORT_IN, SHORT_SL, SHORT_TP = 69, 89, 37
