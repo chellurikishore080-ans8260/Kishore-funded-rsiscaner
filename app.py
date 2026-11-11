@@ -20,6 +20,8 @@ DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL"   # funded pairs (POL,
 ALIASES = {"MATIC": "POL"}               # Binance renamed MATIC to POL
 LONG_IN, LONG_SL, LONG_TP = 31.5, 16, 57
 SHORT_IN, SHORT_SL, SHORT_TP = 69, 89, 37
+MAX_LOSS = 1300         # Rs: a trade is stopped as soon as its loss reaches this (all timeframes except 4h)
+MAX_LOSS_4H = 3000      # Rs: same, for the 4h timeframe only
 RSI_LEN, ST_LEN, ST_MULT = 14, 10, 3.0
 # -------------------------------------------
 HIST_OPTS = [1000, 2000, 3000, 5000, 8000, 10000]   # candles per timeframe for the backtest
@@ -169,9 +171,10 @@ def load_many(pairs, total, ttl, progress=None):
 
 
 # ---------------- BACKTEST ----------------
-def _trade(sym, tf, side, j, i, result, reason, df, ts):
+def _trade(sym, tf, side, j, i, result, reason, df, ts, xp=None):
     cl, r, rej = df.close.values, df.rsi.values, df.rej.values
-    e, x = cl[j], cl[i]
+    e = cl[j]
+    x = cl[i] if xp is None else xp                    # xp = exact stop price for a max-loss stop
     pct = (x / e - 1) * 100 if side == "Long" else (e - x) / e * 100
     entry = f"🟢 RSI ≤ {LONG_IN}" if side == "Long" else f"🔴 RSI ≥ {SHORT_IN}"
     st_at_exit = ("✅ reject" if rej[i] else "no") if side == "Long" else "–"
@@ -182,8 +185,10 @@ def _trade(sym, tf, side, j, i, result, reason, df, ts):
             "PnL %": pct, "_ts": df.cm.values[j], "_state": result}
 
 
-def run_bt(df, sym, tf, strict=False):
+def run_bt(df, sym, tf, strict=False, notional=0.0, max_loss=0.0):
     r, rej, cl = df.rsi.values, df.rej.values, df.close.values
+    op, hi, lo = df["open"].values, df["high"].values, df["low"].values
+    sl = max_loss / notional if (max_loss and notional) else None      # max loss as a fraction of price
     ts = df.t.dt.strftime(FMT).values                         # formatted once per series (fast for 10000 candles)
     out, pos = [], None
     for i in range(len(df)):
@@ -196,6 +201,20 @@ def run_bt(df, sym, tf, strict=False):
                 pos = ("Short", i)
             continue
         side, j = pos
+        if sl is not None:                                # max-loss stop: checked on every candle high/low
+            if side == "Long":
+                lvl = cl[j] * (1 - sl)
+                hit = lo[i] <= lvl
+                fill = op[i] if op[i] <= lvl else lvl     # a gap beyond the stop fills at the open
+            else:
+                lvl = cl[j] * (1 + sl)
+                hit = hi[i] >= lvl
+                fill = op[i] if op[i] >= lvl else lvl
+            if hit:
+                out.append(_trade(sym, tf, side, j, i, "CLOSED", f"🛑 Max loss stop (₹{max_loss:,.0f})",
+                                  df, ts, fill))
+                pos = None
+                continue
         reason = None
         if side == "Long":
             if r[i] <= LONG_SL:
@@ -218,11 +237,12 @@ def run_bt(df, sym, tf, strict=False):
     return out
 
 
-def make_trades(data, notional, strict):
+def make_trades(data, notional, strict, limits=None):
+    limits = limits or {}
     rows = []
     for (s, t), df in data.items():
         if df is not None:
-            rows += run_bt(df, s, t, strict)
+            rows += run_bt(df, s, t, strict, notional, limits.get(t, 0))
     if not rows:
         return pd.DataFrame()
     tr = pd.DataFrame(rows)
@@ -328,6 +348,16 @@ def backtest_tab(pairs):
     cap = c3.number_input("Capital ₹", 10000, 10_000_000, 100000, 10000)
     per = c4.slider("Capital per trade %", 10, 100, 50, 10)
     strict = st.checkbox("Strict: RSI target tappudu price kuda profit lo unte matrame exit")
+    c5, c6 = st.columns(2)
+    ml = c5.number_input("Max loss ₹ per trade (4h tappa anni TF)", 0, 1_000_000, MAX_LOSS, 100,
+                         help="Trade loss ee amount ki cherina ventane trade stop. 0 = off.")
+    ml4 = c6.number_input("Max loss ₹ per trade (4h)", 0, 1_000_000, MAX_LOSS_4H, 100,
+                          help="4h timeframe ki matrame. 0 = off.")
+    notional = cap * per / 100
+    if notional:
+        st.caption(f"Trade size ₹{notional:,.0f} → max loss = price {ml / notional * 100:.2f}% (4h: {ml4 / notional * 100:.2f}%) "
+                   "entry price nundi viruddha disha lo velithe stop.")
+    limits = {t: (ml4 if t == "4h" else ml) for t in TFS}
     if st.button("▶ Run backtest", type="primary", use_container_width=True):
         if not pairs or not tfs:
             st.warning("Pairs, timeframes select cheyyi.")
@@ -337,7 +367,7 @@ def backtest_tab(pairs):
                          progress=lambda x: prog.progress(x, text=f"Data load avutondi... {int(x * 100)}%"))
         prog.empty()
         bad = [f"{s}-{t}" for (s, t), d in data.items() if d is None]
-        st.session_state["bt"] = {"tr": make_trades(data, cap * per / 100, strict), "bad": bad,
+        st.session_state["bt"] = {"tr": make_trades(data, notional, strict, limits), "bad": bad,
                                   "cap": cap, "hist": hist, "data": data}
     bt = st.session_state.get("bt")
     if not bt:
@@ -464,7 +494,8 @@ def boxes(tr):
                             f"🟢 Long {L['Wins']}W/{L['Losses']}L ({L['Win %'] if L['Trades'] else '-'}%) · "
                             f"🔴 Short {S['Wins']}W/{S['Losses']}L ({S['Win %'] if S['Trades'] else '-'}%)")
                     st.dataframe(trade_view(g), hide_index=True, height=min(420, 60 + 36 * len(g)))
-    st.caption("Dark red = ee box lo biggest loss (Loss #1). Grey = inka open (stats lo lekkaledu). "
+    st.caption("🛑 Max loss stop: candle high/low tho check, Exit Price = stop price; Exit Time = aa candle close time. "
+               "Dark red = ee box lo biggest loss (Loss #1). Grey = inka open (stats lo lekkaledu). "
                "Times = candle close, IST.")
 
 
@@ -516,6 +547,8 @@ def main():
             f"Exit: RSI ≥ {LONG_TP}.\n"
             f"- **RSI Short** — RSI ≥ {SHORT_IN} → sell. Stop: RSI ≥ {SHORT_SL}. Exit: RSI ≤ {SHORT_TP}.\n"
             "- Oka coin + timeframe ki okkate position (exit ayyaka matrame next entry).\n"
+            f"- **Max loss stop** — trade loss ₹{MAX_LOSS:,} ki (4h lo ₹{MAX_LOSS_4H:,}) cherite trade stop. "
+            "Candle high/low tho check chestam, exit price = stop price (gap ayite open price).\n"
             "- Backtest history 10000 candles varaku (TF ki). Prathi trade lo entry/exit time, price, "
             "entry logic, exit logic (RSI target / stop) chupistundi.\n"
             "- **Win** = price PnL > 0 matrame. RSI target hit ayyi price loss lo unte adi LOSS.\n"
