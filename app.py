@@ -1,8 +1,7 @@
 """Kishore Funded Pairs - RSI Long + RSI Short scanner & backtest (Binance Spot, Streamlit).
 
 Only the funded pairs you list are scanned/backtested. Same logic as the main RSI scanner:
-  RSI Long : RSI <= 31.5 buy at candle close | exit RSI >= 65 (or >= 58 if a bearish Supertrend
-             line rejects price) | stop RSI <= 16
+  RSI Long : RSI <= 31.5 buy at candle close | exit RSI >= 57 | stop RSI <= 16
   RSI Short: RSI >= 69 sell at candle close | exit RSI <= 37 | stop RSI >= 89
 A trade is a WIN only if the price PnL is > 0 (one single win definition).
 All times are IST and are the candle CLOSE time (entry/exit happen at candle close).
@@ -19,7 +18,7 @@ import streamlit as st
 # ---------------- EDIT HERE ----------------
 DEFAULT_PAIRS = "BTC, ETH, LTC, BCH, XRP, ADA, DOGE, SOL"   # funded pairs (POL, DOT, LINK removed)
 ALIASES = {"MATIC": "POL"}               # Binance renamed MATIC to POL
-LONG_IN, LONG_SL, LONG_TP, LONG_TP_ST = 31.5, 16, 65, 58
+LONG_IN, LONG_SL, LONG_TP = 31.5, 16, 57
 SHORT_IN, SHORT_SL, SHORT_TP = 69, 89, 37
 RSI_LEN, ST_LEN, ST_MULT = 14, 10, 3.0
 # -------------------------------------------
@@ -203,8 +202,6 @@ def run_bt(df, sym, tf, strict=False):
                 reason = f"🛑 RSI stop (≤ {LONG_SL})"
             elif r[i] >= LONG_TP:
                 reason = f"🎯 RSI target (≥ {LONG_TP})"
-            elif r[i] >= LONG_TP_ST and rej[i]:
-                reason = f"🐻 RSI ≥ {LONG_TP_ST} + Bearish ST reject"
         else:
             if r[i] >= SHORT_SL:
                 reason = f"🛑 RSI stop (≥ {SHORT_SL})"
@@ -438,7 +435,7 @@ def boxes(tr):
         st.info("Kanisam oka coin select cheyyi.")
         return
     st.caption(f"Entry logic: 🟢 Long RSI ≤ {LONG_IN} · 🔴 Short RSI ≥ {SHORT_IN}  |  Exit logic: "
-               f"🎯 Long RSI ≥ {LONG_TP} · 🐻 Long RSI ≥ {LONG_TP_ST} + Bearish ST reject · 🛑 Long RSI ≤ {LONG_SL} · "
+               f"🎯 Long RSI ≥ {LONG_TP} · 🛑 Long RSI ≤ {LONG_SL} · "
                f"🎯 Short RSI ≤ {SHORT_TP} · 🛑 Short RSI ≥ {SHORT_SL}")
     for coin in sel:                                           # coin-wise -> timeframe-wise
         c = tr[tr.Coin == coin]
@@ -516,11 +513,11 @@ def main():
     with st.expander("📖 Logic"):
         st.markdown(
             f"- **RSI Long** — RSI ≤ {LONG_IN} → buy at candle close. Stop: RSI ≤ {LONG_SL}. "
-            f"Exit: RSI ≥ {LONG_TP} (or ≥ {LONG_TP_ST} if a bearish Supertrend line rejects price).\n"
+            f"Exit: RSI ≥ {LONG_TP}.\n"
             f"- **RSI Short** — RSI ≥ {SHORT_IN} → sell. Stop: RSI ≥ {SHORT_SL}. Exit: RSI ≤ {SHORT_TP}.\n"
             "- Oka coin + timeframe ki okkate position (exit ayyaka matrame next entry).\n"
             "- Backtest history 10000 candles varaku (TF ki). Prathi trade lo entry/exit time, price, "
-            "entry logic, exit logic (RSI target / Bearish ST reject / stop) chupistundi.\n"
+            "entry logic, exit logic (RSI target / stop) chupistundi.\n"
             "- **Win** = price PnL > 0 matrame. RSI target hit ayyi price loss lo unte adi LOSS.\n"
             "- RSI trades ki price stop ledu, RSI level ye stop, kabatti loss pedda undochu.\n"
             "- Times IST, candle close time.")
